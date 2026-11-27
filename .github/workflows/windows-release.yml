@@ -1,0 +1,57 @@
+name: Build and publish Windows installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: windows-release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build and test StickyNotes
+        shell: pwsh
+        run: |
+          python -m pip install pyinstaller==6.17.0
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed' }
+          python StickyNotes.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'StickyNotes smoke test failed' }
+          python -m PyInstaller --noconfirm --clean --windowed --name StickyNotes --icon StickyNotes.ico StickyNotes.py
+          if ($LASTEXITCODE -ne 0) { throw 'StickyNotes executable build failed' }
+      - name: Compile Windows installer
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (!(Test-Path $compiler)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+          }
+          & $compiler /Q StickyNotes.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - name: Publish installer
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'v1.0.0' }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists. Use a new version tag to publish an update."
+            exit 0
+          }
+          gh release create $tag installer/StickyNotesSetup.exe --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "StickyNotes $tag for Windows" --notes 'Download StickyNotesSetup.exe under Assets. Supports Windows 10 and 11 (x64). No activation key is required. Created by Erick Omari.' --latest
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed' }
